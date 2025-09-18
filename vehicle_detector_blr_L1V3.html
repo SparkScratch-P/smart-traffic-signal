@@ -1,0 +1,347 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Standalone Vehicle Detector — TensorFlow.js (COCO-SSD)</title>
+  <style>
+    :root{--bg:#0f1724;--card:#0b1220;--accent:#06b6d4;--muted:#94a3b8}
+    html,body{height:100%;margin:0;font-family:Inter,system-ui,Segoe UI,Roboto,Arial}
+    body{background:linear-gradient(180deg,#071022 0%, #0b1220 100%);color:#e6eef6;display:flex;gap:18px;align-items:flex-start;justify-content:center;padding:28px}
+    .app{width:980px;max-width:98%;display:grid;grid-template-columns:440px 1fr;gap:18px}
+    .card{background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01));padding:14px;border-radius:12px;box-shadow:0 6px 18px rgba(2,6,23,0.6)}
+    .controls{display:flex;flex-direction:column;gap:10px}
+    video{width:100%;border-radius:8px;background:#000}
+    canvas{position:absolute;left:0;top:0}
+    .video-wrap{position:relative}
+    .btn{background:var(--accent);border:none;padding:8px 12px;border-radius:8px;color:#022;cursor:pointer;font-weight:600}
+    .row{display:flex;gap:8px;align-items:center}
+    .muted{color:var(--muted);font-size:13px}
+    label{font-size:13px}
+    input[type=range]{width:160px}
+    .stats{display:flex;flex-direction:column;gap:6px}
+    .badge{display:inline-block;padding:6px 10px;border-radius:999px;background:rgba(255,255,255,0.03);font-weight:600;color:#dff}
+    .footer{font-size:13px;color:var(--muted);margin-top:8px}
+  </style>
+</head>
+<body>
+  <div class="app">
+    <div class="card">
+      <h3 style="margin:0 0 6px 0">Vehicle Detector — TensorFlow.js (COCO-SSD)</h3>
+      <p class="muted" style="margin:0 0 12px 0">Standalone single-file page. Detects cars, trucks, buses, motorcycles and bicycles from camera, video or image using TensorFlow.js COCO-SSD.</p>
+
+      <div class="controls">
+        <div class="row">
+          <button id="btn-camera" class="btn">Start Camera</button>
+          <button id="btn-stop" class="btn" style="background:#ff7b7b">Stop</button>
+          <input id="file-video" type="file" accept="video/*" />
+          <input id="file-image" type="file" accept="image/*" />
+        </div>
+
+        <div class="row">
+          <label for="confidence">Min confidence</label>
+          <input id="confidence" type="range" min="0" max="1" step="0.01" value="0.5">
+          <span id="conf-val" class="muted">0.50</span>
+        </div>
+
+        <div class="row">
+          <label>Vehicle classes</label>
+          <div style="display:flex;gap:8px;margin-left:8px;flex-wrap:wrap">
+            <label class="badge"><input id="chk-car" type="checkbox" checked> car</label>
+            <label class="badge"><input id="chk-truck" type="checkbox" checked> truck</label>
+            <label class="badge"><input id="chk-bus" type="checkbox" checked> bus</label>
+            <label class="badge"><input id="chk-moto" type="checkbox" checked> motorcycle</label>
+            <label class="badge"><input id="chk-bike" type="checkbox"> bicycle</label>
+          </div>
+        </div>
+
+        <div class="row stats">
+          <div>Detections: <span id="det-count" class="badge">0</span></div>
+          <div id="det-list" class="muted">—</div>
+        </div>
+
+        <div class="footer">Note: open this page using a local web server (e.g. <code>python -m http.server</code>) or localhost. Modern browsers may prevent camera usage from file:// pages.</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <h4 style="margin:0">Preview</h4>
+        <div class="muted">Model: <strong>COCO-SSD (tfjs)</strong></div>
+      </div>
+
+      <div class="video-wrap">
+        <video id="video" autoplay muted playsinline></video>
+        <canvas id="overlay"></canvas>
+      </div>
+
+      <div style="margin-top:12px;display:flex;gap:8px;align-items:center">
+        <button id="btn-snapshot" class="btn">Snapshot</button>
+        <button id="btn-download" class="btn">Download Snapshot</button>
+        <span class="muted">(Snapshot saves detection overlay)</span>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- TensorFlow.js + COCO-SSD CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.12.0/dist/tf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.2/dist/coco-ssd.min.js"></script>
+
+  <script>
+    // Self-contained JS for vehicle detection. Comments explain each step.
+
+// Replace with your Blynk Auth Token
+const BLYNK_AUTH = "LpTIYa43VENKHRK0Y0aIJsPDLL5Uu1qq";
+const BLYNK_URL = `https://blynk.cloud/external/api/update?token=${BLYNK_AUTH}&V3=`;
+
+    const video = document.getElementById('video');
+    const overlay = document.getElementById('overlay');
+    const ctx = overlay.getContext('2d');
+
+    const btnCamera = document.getElementById('btn-camera');
+    const btnStop = document.getElementById('btn-stop');
+    const fileVideo = document.getElementById('file-video');
+    const fileImage = document.getElementById('file-image');
+    const confidenceSlider = document.getElementById('confidence');
+    const confVal = document.getElementById('conf-val');
+    const detCount = document.getElementById('det-count');
+    const detList = document.getElementById('det-list');
+    const btnSnapshot = document.getElementById('btn-snapshot');
+    const btnDownload = document.getElementById('btn-download');
+
+    // vehicle classes we treat as "vehicles" (COCO-SSD class names)
+    const vehicleClasses = () => ({
+      car: document.getElementById('chk-car').checked,
+      truck: document.getElementById('chk-truck').checked,
+      bus: document.getElementById('chk-bus').checked,
+      motorcycle: document.getElementById('chk-moto').checked,
+      bicycle: document.getElementById('chk-bike').checked
+    });
+
+    let model = null;
+    let stream = null;
+    let running = false;
+
+    // Helper: resize canvas to video size
+    function resizeCanvas() {
+      overlay.width = video.videoWidth || 640;
+      overlay.height = video.videoHeight || 480;
+      overlay.style.width = (video.clientWidth || 640) + 'px';
+    }
+
+    // Draw detection boxes and labels
+    function drawDetections(detections, minScore) {
+      ctx.clearRect(0,0,overlay.width,overlay.height);
+      ctx.lineWidth = 2;
+      ctx.font = '16px Arial';
+      ctx.textBaseline = 'top';
+
+      const counts = {};
+      let total = 0;
+
+      detections.forEach(d => {
+        const cls = d.class;
+        const score = d.score;
+        if (score < minScore) return;
+        const allowed = vehicleClasses();
+        if (!allowed[cls]) return; // skip non-selected classes
+
+        // bounding box
+        const [x, y, w, h] = d.bbox;
+        ctx.strokeStyle = '#06b6d4';
+        ctx.strokeRect(x, y, w, h);
+
+        // label + score
+        const text = `${cls} ${(score*100).toFixed(0)}%`;
+        const textW = ctx.measureText(text).width + 8;
+        ctx.fillStyle = 'rgba(6,182,212,0.18)';
+        ctx.fillRect(x, y - 20, textW, 20);
+        ctx.fillStyle = '#e6f9ff';
+        ctx.fillText(text, x + 4, y - 18);
+
+        counts[cls] = (counts[cls]||0) + 1;
+        total += 1;
+      });
+
+      detCount.textContent = total;
+      detList.textContent = Object.keys(counts).length ? Object.entries(counts).map(e=>`${e[0]}: ${e[1]}`).join(', ') : '—';
+
+      
+// Send total vehicle count to Blynk
+fetch(BLYNK_URL + total)
+  .then(() => console.log("Blynk updated:", total))
+  .catch(err => console.error("Blynk update error:", err));
+
+    }
+
+    // Main detection loop for video element
+    async function detectLoop() {
+      if (!running || !model) return;
+      if (video.readyState < 2) {
+        requestAnimationFrame(detectLoop);
+        return;
+      }
+
+      resizeCanvas();
+      // model.detect returns an array of {bbox: [x,y,w,h], class: 'car', score: 0.9}
+      try {
+        const preds = await model.detect(video);
+        const minScore = parseFloat(confidenceSlider.value);
+        drawDetections(preds, minScore);
+      } catch (err) {
+        console.error('Detection error', err);
+      }
+
+      // schedule next frame
+      requestAnimationFrame(detectLoop);
+    }
+
+    // Load model when the page opens — user will see faster response
+    (async () => {
+      try {
+        // load the COCO-SSD model (this downloads model weights from CDN)
+        model = await cocoSsd.load();
+        console.log('COCO-SSD model loaded');
+      } catch (err) {
+        console.error('Failed to load model', err);
+        alert('Failed to load COCO-SSD model. Check console for errors.');
+      }
+    })();
+
+    // Start camera stream
+    btnCamera.addEventListener('click', async () => {
+      if (running) return;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({video: {facingMode: 'environment', width: {ideal: 1280}} , audio: false});
+        video.srcObject = stream;
+        video.play();
+        running = true;
+        detectLoop();
+      } catch (err) {
+        alert('Camera access denied or not available. See console.');
+        console.error(err);
+      }
+    });
+
+    // Stop camera and detection
+    btnStop.addEventListener('click', () => {
+      running = false;
+      if (stream) {
+        stream.getTracks().forEach(t => t.stop());
+        stream = null;
+      }
+      if (video) {
+        video.pause();
+        video.removeAttribute('src');
+        video.load();
+      }
+      ctx.clearRect(0,0,overlay.width,overlay.height);
+      detCount.textContent = '0';
+      detList.textContent = '—';
+    });
+
+    // When the user uploads a video file, play it and run detection
+    fileVideo.addEventListener('change', (ev) => {
+      const f = ev.target.files && ev.target.files[0];
+      if (!f) return;
+      const url = URL.createObjectURL(f);
+      if (stream) { // stop camera if running
+        btnStop.click();
+      }
+      video.srcObject = null;
+      video.src = url;
+      video.loop = true;
+      video.play();
+      running = true;
+      detectLoop();
+    });
+
+    // When the user uploads an image, switch to single-image detection
+    fileImage.addEventListener('change', async (ev) => {
+      const f = ev.target.files && ev.target.files[0];
+      if (!f) return;
+      const imgUrl = URL.createObjectURL(f);
+      const img = new Image();
+      img.onload = async () => {
+        // set video-like dimensions on canvas and draw the image
+        overlay.width = img.naturalWidth;
+        overlay.height = img.naturalHeight;
+        // draw image to an offscreen canvas and run model.detect on that canvas
+        const off = document.createElement('canvas');
+        off.width = img.naturalWidth;
+        off.height = img.naturalHeight;
+        const octx = off.getContext('2d');
+        octx.drawImage(img,0,0);
+        try {
+          const preds = await model.detect(off);
+          // show the image in video area by drawing it to overlay then draw detections
+          ctx.clearRect(0,0,overlay.width,overlay.height);
+          ctx.drawImage(img,0,0);
+          drawDetections(preds, parseFloat(confidenceSlider.value));
+        } catch (err) {
+          console.error(err);
+          alert('Detection failed on image. See console.');
+        }
+      };
+      img.src = imgUrl;
+    });
+
+    // confidence slider UI
+    confidenceSlider.addEventListener('input', () => {
+      confVal.textContent = parseFloat(confidenceSlider.value).toFixed(2);
+    });
+
+    // Snapshot: export overlay combined with video frame
+    btnSnapshot.addEventListener('click', () => {
+      const exportCanvas = document.createElement('canvas');
+      exportCanvas.width = overlay.width;
+      exportCanvas.height = overlay.height;
+      const ectx = exportCanvas.getContext('2d');
+      // draw current video frame
+      try {
+        ectx.drawImage(video, 0, 0, exportCanvas.width, exportCanvas.height);
+      } catch (e) {
+        // video might be empty; fall back to overlay only
+        console.warn('Could not draw video frame to snapshot', e);
+      }
+      // draw overlay on top
+      ectx.drawImage(overlay, 0, 0);
+      const dataUrl = exportCanvas.toDataURL('image/png');
+      // show in new window/tab
+      const w = window.open('about:blank');
+      if (w) {
+        w.document.write(`<img src="${dataUrl}" alt="snapshot">`);
+      }
+    });
+
+    // Download last snapshot (same as snapshot but auto-download)
+    btnDownload.addEventListener('click', () => {
+      const exportCanvas = document.createElement('canvas');
+      exportCanvas.width = overlay.width;
+      exportCanvas.height = overlay.height;
+      const ectx = exportCanvas.getContext('2d');
+      try { ectx.drawImage(video, 0, 0, exportCanvas.width, exportCanvas.height); } catch(e){}
+      ectx.drawImage(overlay,0,0);
+      const a = document.createElement('a');
+      a.href = exportCanvas.toDataURL('image/png');
+      a.download = 'snapshot.png';
+      a.click();
+    });
+
+    // Auto-resize overlay when video metadata loads
+    video.addEventListener('loadedmetadata', () => {
+      resizeCanvas();
+    });
+
+    // Helpful keyboard shortcuts
+    window.addEventListener('keydown', (e) => {
+      if (e.key === 'c') btnCamera.click();
+      if (e.key === 's') btnStop.click();
+    });
+
+    // Final note: The model files are fetched from CDN when cocoSsd.load() runs.
+    // If you want fully offline use, host the model artifacts locally and change the loader.
+  </script>
+</body>
+</html>
